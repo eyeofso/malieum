@@ -831,7 +831,20 @@
   var SILENT_TURN_MS = 3500;
 
   // Conversation mode: the phone keeps listening and the turn passes back and forth by itself.
-  var conv = { on:false, turn:'me', busy:false, overridden:false, restartTimer:null, wakeLock:null, failures:0 };
+  // otherTyped: the other person's language cannot be heard on this phone, so they type instead.
+  var conv = { on:false, turn:'me', busy:false, overridden:false, restartTimer:null, wakeLock:null,
+               failures:0, micErrors:0, retryDelay:0, otherTyped:false };
+  var MAX_MIC_RETRIES = 3;
+
+  function otherNeedsTyping(){
+    conv.otherTyped = true;
+    conv.turn = 'me';
+    conv.overridden = true;
+    conv.micErrors = 0;
+    openManualPanel('other');
+    showStatus(state.targetLang.name + '는 이 휴대폰에서 음성 인식이 안 돼요. 상대방 말은 아래에 글자로 입력해주세요. 내 말은 계속 음성으로 통역해요.', true);
+    renderTurn();
+  }
 
   function otherSide(direction){ return direction === 'me' ? 'other' : 'me'; }
 
@@ -851,7 +864,7 @@
       el.turnSub.textContent = '다음 차례: ' + turnLabel(conv.turn);
     } else {
       el.turnMain.textContent = '🎤 ' + turnLabel(conv.turn) + ' 말해주세요';
-      el.turnSub.textContent = '차례가 다르면 여기를 눌러 바꾸세요';
+      el.turnSub.textContent = conv.otherTyped ? '상대방 말은 아래에 글자로 입력해주세요' : '차례가 다르면 여기를 눌러 바꾸세요';
     }
   }
 
@@ -931,6 +944,7 @@
     hideStatus();
     stopSound();
     conv.on = true; conv.turn = 'me'; conv.busy = false; conv.overridden = false; conv.failures = 0;
+    conv.micErrors = 0; conv.retryDelay = 0; conv.otherTyped = false;
     updateConvButton();
     try{
       if (navigator.wakeLock && navigator.wakeLock.request){
@@ -977,9 +991,10 @@
       if (!conv.on) return;
       conv.busy = false;
       if (ok && !conv.overridden) conv.turn = otherSide(direction);
+      if (conv.otherTyped) conv.turn = 'me';
       conv.overridden = false;
       renderTurn();
-      convListenSoon(350);
+      convListenSoon(500);
     });
   }
 
@@ -993,6 +1008,7 @@
       var text = e.results && e.results[0] && e.results[0][0] ? e.results[0][0].transcript : '';
       if (!text || !conv.on) return;
       gotResult = true;
+      conv.micErrors = 0;
       interpretInConversation(currentDirection, text);
     };
     recognition.onerror = function(e){
@@ -1007,13 +1023,22 @@
         showStatus('이 브라우저에서는 음성 인식을 쓸 수 없어요. 안드로이드는 Chrome, 아이폰은 Safari로 열어주세요. 그동안은 글자로 입력할 수 있어요.', true);
         return;
       }
-      if (e.error === 'language-not-supported'){
-        // The other side cannot be heard by voice: hand the turn back and let them type.
-        conv.turn = 'me';
-        conv.overridden = true;
-        openManualPanel('other');
-        showStatus(state.targetLang.name + '는 이 휴대폰에서 음성 인식이 안 돼요. 상대방 말은 아래에 글자로 입력해주세요.', true);
+      if (e.error === 'language-not-supported' && currentDirection === 'other'){
+        otherNeedsTyping();
         return;
+      }
+      if (e.error === 'audio-capture' || e.error === 'network'){
+        // Usually the microphone was still busy from the previous turn: wait and try again.
+        conv.micErrors++;
+        if (conv.micErrors <= MAX_MIC_RETRIES){
+          conv.overridden = true;            // keep the same turn
+          conv.retryDelay = 700 * conv.micErrors;
+          return;
+        }
+        if (e.error === 'audio-capture' && currentDirection === 'other'){
+          otherNeedsTyping();                // Korean works but this language never starts
+          return;
+        }
       }
       var msg = '음성을 인식하지 못했어요. 대화 모드를 다시 눌러주세요.';
       if (e.error === 'audio-capture') msg = '마이크를 찾지 못했어요. 다른 앱이 마이크를 쓰고 있는지 확인해주세요.';
@@ -1027,10 +1052,11 @@
       if (!conv.busy && !gotResult){
         if (conv.overridden){
           conv.overridden = false;
-        } else if (Date.now() - listenStartedAt >= SILENT_TURN_MS){
+        } else if (!conv.otherTyped && Date.now() - listenStartedAt >= SILENT_TURN_MS){
           conv.turn = otherSide(conv.turn);   // nobody spoke: offer the turn to the other person
         }
-        convListenSoon(300);
+        convListenSoon(conv.retryDelay || 300);
+        conv.retryDelay = 0;
       }
       renderTurn();
     };
@@ -1108,14 +1134,29 @@
     });
     el.turnBox.addEventListener('click', function(){
       unlockSound();
-      if (conv.on) setConversationTurn(otherSide(conv.turn));
+      if (!conv.on) return;
+      if (conv.otherTyped){
+        openManualPanel('other');
+        return;
+      }
+      setConversationTurn(otherSide(conv.turn));
     });
     el.targetLangSelect.addEventListener('change', function(){
-      renderTurn();
-      if (conv.on && isRecording && currentDirection === 'other'){
-        conv.overridden = true;
-        try{ recognition.abort(); }catch(e){}
+      // A new language gets a fresh start: Korean first, microphone released before reuse.
+      conv.otherTyped = false;
+      conv.micErrors = 0;
+      if (conv.on){
+        hideStatus();
+        conv.turn = 'me';
+        if (isRecording){
+          conv.overridden = true;
+          conv.retryDelay = 800;
+          try{ recognition.abort(); }catch(e){}
+        } else if (!conv.busy){
+          convListenSoon(800);
+        }
       }
+      renderTurn();
     });
     document.addEventListener('visibilitychange', function(){
       if (document.hidden) stopConversation();
