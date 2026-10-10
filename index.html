@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>말이음</title>
 <meta name="theme-color" content="#2A6F73">
+<meta name="referrer" content="no-referrer">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="말이음">
@@ -187,6 +188,20 @@
   }
   .status-bar.error{ color:var(--danger); background:color-mix(in srgb, var(--danger) 14%, var(--surface)); }
 
+  .conv-btn{
+    display:flex; align-items:center; justify-content:center; gap:8px;
+    width:100%; border:2px solid var(--teal); background:var(--surface); color:var(--teal-dark);
+    border-radius:16px; padding:12px 10px; margin-bottom:8px; cursor:pointer;
+    font-family:inherit; font-size:16px; font-weight:700; box-shadow:var(--shadow);
+  }
+  .conv-btn.on{ background:var(--danger); border-color:var(--danger); color:#fff; }
+  .conv-ico{ font-size:20px; }
+  .conv-hint{ margin:0 0 8px; font-size:12.5px; line-height:1.5; color:var(--ink-soft); text-align:center; }
+  .mic-row.conv-on .mic-btn:not(.recording){ opacity:.55; }
+  .replay-btn{
+    border:none; background:transparent; cursor:pointer; font-size:16px; line-height:1;
+    padding:4px 6px; border-radius:8px; vertical-align:middle;
+  }
   .mic-row{ display:flex; gap:12px; padding-block:4px; }
   .mic-btn{
     flex:1 1 0; display:flex; flex-direction:column; align-items:center; gap:4px;
@@ -298,7 +313,13 @@
 
   <div id="statusBar" class="status-bar" hidden></div>
 
-  <div class="mic-row">
+  <button id="convBtn" class="conv-btn" type="button" aria-pressed="false">
+    <span class="conv-ico" aria-hidden="true">💬</span>
+    <span id="convBtnLabel">대화 모드 시작</span>
+  </button>
+  <p id="convHint" class="conv-hint" hidden>한 사람씩 번갈아 말하면 자동으로 통역해요. 같은 사람이 이어서 말하려면 아래에서 그 사람 버튼을 눌러주세요.</p>
+
+  <div id="micRow" class="mic-row">
     <button id="micMe" class="mic-btn mic-me" type="button">
       <span class="mic-icon">🎤</span>
       <span class="mic-label">나<br>한국어로 말하기</span>
@@ -347,6 +368,8 @@
 
     <h3>ℹ️ 알아두세요</h3>
     <ul>
+      <li><b>대화 모드</b>를 켜면 버튼을 매번 누르지 않아도 돼요. 내가 한국어로 말하면 상대방 언어로 소리 내어 읽어주고, 이어서 상대방 차례로 넘어가요. 끝낼 때는 "대화 모드 끝내기"를 눌러주세요.</li>
+      <li>통역 소리가 안 들리면 휴대폰의 미디어 음량과 무음 모드를 확인해주세요.</li>
       <li>마이크 버튼을 처음 누르면 "마이크를 허용할까요?" 창이 떠요. <b>허용</b>을 눌러주세요.</li>
       <li>실수로 차단했다면: 주소창의 자물쇠(🔒) → 권한 → 마이크 → 허용으로 바꾸고 새로고침 해주세요.</li>
       <li>안드로이드는 Chrome, 아이폰은 Safari에서 열어주세요. 카카오톡 등 앱 안에서 열린 화면에서는 마이크가 안 될 수 있어요.</li>
@@ -385,6 +408,10 @@
     otherMicLangName: document.getElementById('otherMicLangName'),
     micMe: document.getElementById('micMe'),
     micOther: document.getElementById('micOther'),
+    micRow: document.getElementById('micRow'),
+    convBtn: document.getElementById('convBtn'),
+    convBtnLabel: document.getElementById('convBtnLabel'),
+    convHint: document.getElementById('convHint'),
     statusBar: document.getElementById('statusBar'),
     manualToggle: document.getElementById('manualToggle'),
     manualPanel: document.getElementById('manualPanel'),
@@ -558,18 +585,174 @@
     return '번역에 실패했어요. 잠시 후 다시 시도해주세요.';
   }
 
-  // ---- Speech synthesis (TTS) ----
+  // ---- Speaking the translation aloud ----
 
   var hasTTS = 'speechSynthesis' in window;
+  var voices = [];
+  var player = null;
+  var soundUnlocked = false;
+  var speakToken = 0;
+  var SILENT_WAV = 'data:audio/wav;base64,UklGRrQBAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YZABAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA';
 
-  function speak(text, bcpLang){
-    if (!hasTTS || !text) return;
+  function loadVoices(){ try{ voices = window.speechSynthesis.getVoices() || []; }catch(e){ voices = []; } }
+  if (hasTTS){
+    loadVoices();
+    try{ window.speechSynthesis.onvoiceschanged = loadVoices; }catch(e){}
+  }
+  try{ player = new Audio(); player.preload = 'auto'; }catch(e){ player = null; }
+
+  function findVoice(bcp){
+    var want = bcp.toLowerCase();
+    var bases = [want.split('-')[0]];
+    if (bases[0] === 'fil') bases.push('tl');
+    var exact = null, loose = null;
+    voices.forEach(function(v){
+      var l = String(v.lang || '').replace('_','-').toLowerCase();
+      if (l === want && !exact) exact = v;
+      if (bases.indexOf(l.split('-')[0]) !== -1 && !loose) loose = v;
+    });
+    return exact || loose;
+  }
+
+  // Phones only allow sound that starts from a tap. Call this inside every tap handler.
+  function unlockSound(){
+    if (soundUnlocked) return;
+    soundUnlocked = true;
+    if (player){
+      try{
+        player.src = SILENT_WAV;
+        var p = player.play();
+        if (p && p.catch) p.catch(function(){});
+      }catch(e){}
+    }
+    if (hasTTS){
+      try{
+        var u = new SpeechSynthesisUtterance(' ');
+        u.volume = 0;
+        window.speechSynthesis.speak(u);
+      }catch(e){}
+    }
+  }
+
+  function stopSound(){
+    speakToken++;
+    if (player){ try{ player.onended = null; player.onerror = null; player.pause(); }catch(e){} }
+    if (hasTTS){ try{ window.speechSynthesis.cancel(); }catch(e){} }
+  }
+
+  function splitForSpeech(text, max){
+    var parts = [], rest = text.trim();
+    while (rest.length > max){
+      var cut = -1;
+      ['. ','? ','! ','。',', ',' '].some(function(sep){
+        var i = rest.lastIndexOf(sep, max);
+        if (i > max * 0.4){ cut = i + sep.length; return true; }
+        return false;
+      });
+      if (cut < 0) cut = max;
+      parts.push(rest.slice(0, cut).trim());
+      rest = rest.slice(cut).trim();
+    }
+    if (rest) parts.push(rest);
+    return parts;
+  }
+
+  function onlineLang(bcp){
+    if (bcp === 'fil-PH') return 'tl';
+    if (bcp === 'zh-CN') return 'zh-CN';
+    return bcp.split('-')[0];
+  }
+
+  // result(true) when the whole text was spoken, result(false) when it could not be.
+  function speakWithDevice(text, bcp, voice, token, result){
+    var settled = false, started = false, timer = null;
+    function finish(ok){
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (token === speakToken) result(ok);
+    }
     try{
       var u = new SpeechSynthesisUtterance(text);
-      u.lang = bcpLang;
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(u);
-    }catch(e){}
+      u.lang = voice ? voice.lang : bcp;
+      if (voice) u.voice = voice;
+      u.onstart = function(){ started = true; clearTimeout(timer); };
+      u.onend = function(){ finish(true); };
+      u.onerror = function(){ finish(started); };
+      setTimeout(function(){
+        if (token !== speakToken) return;
+        try{ window.speechSynthesis.speak(u); }catch(e){ finish(false); }
+      }, 80);
+      timer = setTimeout(function(){
+        if (!started){
+          try{ window.speechSynthesis.cancel(); }catch(e){}
+          finish(false);
+        }
+      }, 3000);
+    }catch(e){ finish(false); }
+  }
+
+  function speakWithOnlineVoice(text, bcp, token, result){
+    if (!player){ result(false); return; }
+    var chunks = splitForSpeech(text, 180), i = 0, settled = false;
+    function finish(ok){
+      if (settled) return;
+      settled = true;
+      player.onended = null; player.onerror = null;
+      if (token === speakToken) result(ok);
+    }
+    function next(){
+      if (token !== speakToken) return;
+      if (i >= chunks.length){ finish(true); return; }
+      player.src = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=' +
+        encodeURIComponent(onlineLang(bcp)) + '&q=' + encodeURIComponent(chunks[i++]);
+      try{
+        var p = player.play();
+        if (p && p.catch) p.catch(function(){ finish(false); });
+      }catch(e){ finish(false); }
+    }
+    player.onended = next;
+    player.onerror = function(){ finish(false); };
+    next();
+  }
+
+  function speak(text, bcpLang, done){
+    done = done || function(){};
+    if (!text){ done(); return; }
+    stopSound();
+    var token = speakToken;
+    var voice = hasTTS ? findVoice(bcpLang) : null;
+    function failed(){
+      showStatus('이 휴대폰에서 음성을 재생하지 못했어요. 소리(미디어 음량)를 확인하고 말풍선의 🔊 를 눌러보세요.', true);
+      done();
+    }
+    if (hasTTS && (voice || voices.length === 0)){
+      speakWithDevice(text, bcpLang, voice, token, function(ok){
+        if (ok){ done(); return; }
+        speakWithOnlineVoice(text, bcpLang, token, function(ok2){ if (ok2) done(); else failed(); });
+      });
+    } else {
+      speakWithOnlineVoice(text, bcpLang, token, function(ok){
+        if (ok){ done(); return; }
+        if (!hasTTS){ failed(); return; }
+        speakWithDevice(text, bcpLang, null, token, function(ok2){ if (ok2) done(); else failed(); });
+      });
+    }
+  }
+
+  function addReplayButton(node, text, bcpLang){
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'replay-btn';
+    b.setAttribute('aria-label', '다시 듣기');
+    b.textContent = '🔊';
+    b.addEventListener('click', function(){
+      unlockSound();
+      hideStatus();
+      speak(text, bcpLang);
+    });
+    node.appendChild(document.createTextNode(' '));
+    node.appendChild(b);
   }
 
   // ---- Speech recognition (STT) ----
@@ -580,12 +763,21 @@
   var isRecording = false;
   var currentDirection = 'me';
   var micAsked = false;
+  var gotResult = false;
   var MIC_BLOCKED_MSG = '마이크가 차단되어 있어요. 주소창의 자물쇠(🔒) → 권한 → 마이크를 "허용"으로 바꾼 뒤 새로고침 해주세요. 그동안은 아래에 글자로 입력할 수 있어요.';
 
-  function fallbackToTyping(direction){
+  // Conversation mode: the phone keeps listening and the turn passes back and forth by itself.
+  var conv = { on:false, turn:'me', busy:false, overridden:false, restartTimer:null, wakeLock:null, failures:0 };
+
+  function clearRecordingUi(){
     isRecording = false;
     el.micMe.classList.remove('recording');
     el.micOther.classList.remove('recording');
+  }
+
+  function fallbackToTyping(direction){
+    stopConversation();
+    clearRecordingUi();
     openManualPanel(direction);
     showStatus(MIC_BLOCKED_MSG, true);
   }
@@ -607,6 +799,104 @@
     });
   }
 
+  function turnLabel(direction){
+    return direction === 'me' ? '나 (한국어)' : '상대방 (' + state.targetLang.name + ')';
+  }
+
+  function listen(direction){
+    currentDirection = direction;
+    gotResult = false;
+    recognition.lang = direction === 'me' ? 'ko-KR' : state.targetLang.bcp;
+    isRecording = true;
+    el.micMe.classList.toggle('recording', direction === 'me');
+    el.micOther.classList.toggle('recording', direction !== 'me');
+    if (conv.on){
+      showStatus('🎤 ' + turnLabel(direction) + ' 차례예요. 말해주세요');
+    } else {
+      showStatus(direction === 'me' ? '듣고 있어요… 한국어로 말해주세요' : '듣고 있어요… ' + state.targetLang.name + '로 말해주세요');
+    }
+    try{
+      recognition.start();
+      return true;
+    }catch(err){
+      clearRecordingUi();
+      return false;
+    }
+  }
+
+  function convListenSoon(delay){
+    clearTimeout(conv.restartTimer);
+    conv.restartTimer = setTimeout(function(){
+      if (!conv.on || conv.busy || isRecording) return;
+      if (!listen(conv.turn)){
+        conv.failures++;
+        if (conv.failures > 5){
+          stopConversation();
+          showStatus('마이크를 다시 시작하지 못했어요. 대화 모드를 다시 눌러주세요.', true);
+        } else {
+          convListenSoon(600);
+        }
+      } else {
+        conv.failures = 0;
+      }
+    }, delay);
+  }
+
+  function updateConvButton(){
+    el.convBtn.classList.toggle('on', conv.on);
+    el.convBtn.setAttribute('aria-pressed', conv.on ? 'true' : 'false');
+    el.convBtnLabel.textContent = conv.on ? '대화 모드 끝내기' : '대화 모드 시작';
+    el.convHint.hidden = !conv.on;
+    el.micRow.classList.toggle('conv-on', conv.on);
+  }
+
+  function startConversation(){
+    if (!hasSTT){
+      showStatus('이 브라우저는 음성 인식을 지원하지 않아 대화 모드를 쓸 수 없어요. 안드로이드는 Chrome, 아이폰은 Safari로 열어주세요.', true);
+      return;
+    }
+    if (isRecording){ try{ recognition.abort(); }catch(e){} clearRecordingUi(); }
+    stopSound();
+    conv.on = true; conv.turn = 'me'; conv.busy = false; conv.overridden = false; conv.failures = 0;
+    updateConvButton();
+    showStatus('🎤 ' + turnLabel('me') + ' 차례예요. 말해주세요');
+    try{
+      if (navigator.wakeLock && navigator.wakeLock.request){
+        navigator.wakeLock.request('screen').then(function(l){ conv.wakeLock = l; }, function(){});
+      }
+    }catch(e){}
+    askMicOnce().then(function(ok){
+      if (!ok){ fallbackToTyping('me'); return; }
+      if (conv.on) convListenSoon(250);
+    });
+  }
+
+  function stopConversation(){
+    if (!conv.on) return;
+    conv.on = false; conv.busy = false;
+    clearTimeout(conv.restartTimer);
+    if (conv.wakeLock){ try{ conv.wakeLock.release(); }catch(e){} conv.wakeLock = null; }
+    if (recognition){ try{ recognition.abort(); }catch(e){} }
+    clearRecordingUi();
+    stopSound();
+    updateConvButton();
+    hideStatus();
+  }
+
+  function setConversationTurn(direction){
+    conv.turn = direction;
+    conv.overridden = true;
+    if (conv.busy){
+      showStatus('다음 차례: ' + turnLabel(direction));
+      return;
+    }
+    if (isRecording){
+      try{ recognition.abort(); }catch(e){}   // onend restarts with the new turn
+    } else {
+      convListenSoon(100);
+    }
+  }
+
   if (hasSTT){
     recognition = new RecognitionCtor();
     recognition.continuous = false;
@@ -615,7 +905,22 @@
 
     recognition.onresult = function(e){
       var text = e.results && e.results[0] && e.results[0][0] ? e.results[0][0].transcript : '';
-      if (text) handleUtterance(currentDirection, text);
+      if (!text) return;
+      gotResult = true;
+      var direction = currentDirection;
+      if (conv.on){
+        conv.busy = true;
+        conv.overridden = false;
+        handleUtterance(direction, text, function(ok){
+          if (!conv.on) return;
+          conv.busy = false;
+          if (ok && !conv.overridden) conv.turn = direction === 'me' ? 'other' : 'me';
+          conv.overridden = false;
+          convListenSoon(350);
+        });
+      } else {
+        handleUtterance(direction, text);
+      }
     };
     recognition.onerror = function(e){
       var msg = '음성을 인식하지 못했어요. 다시 시도해주세요.';
@@ -624,74 +929,85 @@
         return;
       }
       if (e.error === 'service-not-allowed'){
+        stopConversation();
         openManualPanel(currentDirection);
         showStatus('이 브라우저에서는 음성 인식을 쓸 수 없어요. 안드로이드는 Chrome, 아이폰은 Safari로 열어주세요. 그동안은 글자로 입력할 수 있어요.', true);
         return;
       }
+      if (e.error === 'aborted') return;
+      if (conv.on && e.error === 'no-speech') return;   // keep waiting on the same turn
       if (e.error === 'audio-capture') msg = '마이크를 찾지 못했어요. 다른 앱이 마이크를 쓰고 있는지 확인해주세요.';
       if (e.error === 'network') msg = '음성 인식에는 인터넷이 필요해요. 연결을 확인해주세요.';
-      if (e.error === 'aborted') return;
       if (e.error === 'no-speech') msg = '목소리가 들리지 않았어요. 다시 눌러 말해주세요.';
       if (e.error === 'language-not-supported') msg = '이 언어는 음성 인식을 지원하지 않아요. 글자로 입력해주세요.';
+      if (conv.on && e.error === 'language-not-supported'){
+        // The other side cannot be heard by voice: hand the turn back and let them type.
+        conv.turn = 'me';
+        openManualPanel('other');
+        msg = state.targetLang.name + '는 이 휴대폰에서 음성 인식이 안 돼요. 상대방 말은 아래에 글자로 입력해주세요.';
+      } else if (conv.on){
+        stopConversation();
+      }
       showStatus(msg, true);
     };
     recognition.onend = function(){
-      if (isRecording && !el.statusBar.classList.contains('error')) hideStatus();
-      isRecording = false;
-      el.micMe.classList.remove('recording');
-      el.micOther.classList.remove('recording');
+      var wasError = el.statusBar.classList.contains('error');
+      if (isRecording && !wasError && !conv.on) hideStatus();
+      clearRecordingUi();
+      if (conv.on && !conv.busy && !gotResult) convListenSoon(300);
     };
   }
 
   function startRecording(direction){
+    unlockSound();
+    if (conv.on){
+      setConversationTurn(direction);
+      return;
+    }
     if (!hasSTT){
       openManualPanel(direction);
       showStatus('이 브라우저는 음성 인식을 지원하지 않아요. 글자로 입력해주세요.', true);
       return;
     }
     if (isRecording){
-      isRecording = false;
-      el.micMe.classList.remove('recording');
-      el.micOther.classList.remove('recording');
+      clearRecordingUi();
       hideStatus();
       try{ recognition.stop(); }catch(e){}
       return;
     }
     hideStatus();
-    currentDirection = direction;
-    recognition.lang = direction === 'me' ? 'ko-KR' : state.targetLang.bcp;
+    stopSound();
     isRecording = true;
     (direction === 'me' ? el.micMe : el.micOther).classList.add('recording');
-    showStatus(direction === 'me' ? '듣고 있어요… 한국어로 말해주세요' : '듣고 있어요… ' + state.targetLang.name + '로 말해주세요');
     askMicOnce().then(function(ok){
       if (!ok){ fallbackToTyping(direction); return; }
-      if (!isRecording) return;
-      try{
-        recognition.start();
-      }catch(err){
-        isRecording = false;
-        el.micMe.classList.remove('recording');
-        el.micOther.classList.remove('recording');
+      if (!isRecording || conv.on) return;
+      if (!listen(direction)){
         showStatus('마이크를 시작하지 못했어요. 다시 눌러주세요.', true);
       }
     });
   }
 
-  function handleUtterance(direction, text){
+  // done(ok) is called once the translation has been shown and read aloud (or has failed).
+  function handleUtterance(direction, text, done){
+    done = done || function(){};
     hideStatus();
     var node = addBubble(direction, text);
     var fromCode = direction === 'me' ? 'ko' : state.targetLang.code;
     var toCode = direction === 'me' ? state.targetLang.code : 'ko';
+    var voiceLang = direction === 'me' ? state.targetLang.bcp : 'ko-KR';
 
     translate(text, fromCode, toCode).then(function(translated){
       setBubbleTranslation(node, translated);
-      if (direction === 'me'){
-        speak(translated, state.targetLang.bcp);
-      } else if (state.ttsMode === 'voice'){
-        speak(translated, 'ko-KR');
+      addReplayButton(node, translated, voiceLang);
+      if (direction === 'me' || state.ttsMode === 'voice'){
+        speak(translated, voiceLang, function(){ done(true); });
+      } else {
+        done(true);
       }
     }).catch(function(err){
       setBubbleTranslation(node, translationErrorMessage(err));
+      done(false);
     });
   }
 
@@ -723,6 +1039,7 @@
       var text = el.manualInput.value.trim();
       if (!text) return;
       el.manualInput.value = '';
+      unlockSound();
       handleUtterance(state.manualDir, text);
     });
   }
@@ -732,6 +1049,16 @@
   function initMicButtons(){
     el.micMe.addEventListener('click', function(){ startRecording('me'); });
     el.micOther.addEventListener('click', function(){ startRecording('other'); });
+    el.convBtn.addEventListener('click', function(){
+      unlockSound();
+      if (conv.on) stopConversation(); else startConversation();
+    });
+    el.targetLangSelect.addEventListener('change', function(){
+      if (conv.on && isRecording && currentDirection === 'other'){ try{ recognition.abort(); }catch(e){} }
+    });
+    document.addEventListener('visibilitychange', function(){
+      if (document.hidden) stopConversation();
+    });
     if (!hasSTT){
       el.micMe.querySelector('.mic-icon').textContent = '⌨️';
       el.micOther.querySelector('.mic-icon').textContent = '⌨️';
