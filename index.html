@@ -172,7 +172,7 @@
 
   .settings-row{
     display:flex; align-items:center; justify-content:space-between;
-    gap:10px; padding:8px 4px; font-size:13px; color:var(--ink-soft);
+    gap:10px; padding:4px 4px; font-size:13px; color:var(--ink-soft);
   }
   .segmented{ display:flex; background:var(--surface-muted); border-radius:999px; padding:3px; }
   .seg-btn{
@@ -311,6 +311,14 @@
     </div>
   </div>
 
+  <div class="settings-row">
+    <span>통역 목소리</span>
+    <div class="segmented" role="group" aria-label="통역 목소리 선택">
+      <button type="button" class="seg-btn active" data-gender="female" aria-pressed="true">👩 여자</button>
+      <button type="button" class="seg-btn" data-gender="male" aria-pressed="false">👨 남자</button>
+    </div>
+  </div>
+
   <div id="statusBar" class="status-bar" hidden></div>
 
   <button id="convBtn" class="conv-btn" type="button" aria-pressed="false">
@@ -369,6 +377,7 @@
     <h3>ℹ️ 알아두세요</h3>
     <ul>
       <li><b>대화 모드</b>를 켜면 버튼을 매번 누르지 않아도 돼요. 내가 한국어로 말하면 상대방 언어로 소리 내어 읽어주고, 이어서 상대방 차례로 넘어가요. 끝낼 때는 "대화 모드 끝내기"를 눌러주세요.</li>
+      <li><b>통역 목소리</b>에서 여자·남자를 고를 수 있어요. 휴대폰에 그 성별의 음성이 없는 언어는 목소리 높낮이를 바꿔 비슷하게 들려줘요.</li>
       <li>통역 소리가 안 들리면 휴대폰의 미디어 음량과 무음 모드를 확인해주세요.</li>
       <li>마이크 버튼을 처음 누르면 "마이크를 허용할까요?" 창이 떠요. <b>허용</b>을 눌러주세요.</li>
       <li>실수로 차단했다면: 주소창의 자물쇠(🔒) → 권한 → 마이크 → 허용으로 바꾸고 새로고침 해주세요.</li>
@@ -427,6 +436,7 @@
   var state = {
     targetLang: LANGS[0],
     ttsMode: 'voice',
+    voiceGender: 'female',
     manualDir: 'me',
     hasRealMessage: false,
     ready: true
@@ -461,7 +471,7 @@
   function initTtsToggle(){
     var saved = safeGet('mie_ttsMode');
     if (saved === 'voice' || saved === 'text') state.ttsMode = saved;
-    var btns = document.querySelectorAll('.seg-btn');
+    var btns = document.querySelectorAll('.seg-btn[data-mode]');
     function apply(){
       btns.forEach(function(b){ b.classList.toggle('active', b.dataset.mode === state.ttsMode); });
     }
@@ -471,6 +481,29 @@
         state.ttsMode = b.dataset.mode;
         safeSet('mie_ttsMode', state.ttsMode);
         apply();
+      });
+    });
+  }
+
+  function initVoiceGender(){
+    var saved = safeGet('mie_voiceGender');
+    if (saved === 'female' || saved === 'male') state.voiceGender = saved;
+    var btns = document.querySelectorAll('.seg-btn[data-gender]');
+    function apply(){
+      btns.forEach(function(b){
+        var on = b.dataset.gender === state.voiceGender;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+    }
+    apply();
+    btns.forEach(function(b){
+      b.addEventListener('click', function(){
+        state.voiceGender = b.dataset.gender;
+        safeSet('mie_voiceGender', state.voiceGender);
+        apply();
+        unlockSound();
+        speak(state.voiceGender === 'male' ? '남자 목소리입니다' : '여자 목소리입니다', 'ko-KR');
       });
     });
   }
@@ -601,17 +634,42 @@
   }
   try{ player = new Audio(); player.preload = 'auto'; }catch(e){ player = null; }
 
+  // Phones do not say whether a voice is male or female, so the name is the only clue.
+  var MALE_NAME = /(^|[^a-z])male|남성|남자|\b(man|daniel|alex|fred|aaron|arthur|gordon|rishi|thomas|david|mark|james|guy|minsu|injoon|in-joon|hyunsu|bongjin|namminh|dmitry|pavel|maxim|yuri|otoya|ichiro|keita|kangkang|yunyang|yunxi|yunjian|jorge|diego|pablo|alvaro|maged|majed|tarik|hamed|ardi|niwat|piseth|bataa|sardor|sagar|thiha|angelo)\b/i;
+  var FEMALE_NAME = /female|여성|여자|\b(woman|yuna|sora|heami|sunhi|sun-hi|jimin|seoyeon|samantha|victoria|karen|moira|tessa|zira|susan|ava|allison|linh|hoaimy|milena|irina|svetlana|dariya|katya|kyoko|haruka|nanami|ayumi|tingting|ting-ting|meijia|mei-jia|sinji|sin-ji|huihui|xiaoxiao|xiaoyi|monica|paulina|helena|elvira|laila|salma|hoda|zariyah|kanya|narisa|premwadee|sreymom|yesui|madina|hemkala|gadis|damayanti|nilar|blessica)\b/i;
+
+  function voiceGender(v){
+    var n = String(v.name || '');
+    if (FEMALE_NAME.test(n)) return 'female';
+    if (MALE_NAME.test(n)) return 'male';
+    return '';
+  }
+
+  // Picks the device voice for a language, preferring the chosen gender.
+  // When no voice of that gender exists, the pitch is shifted to approximate it.
   function findVoice(bcp){
     var want = bcp.toLowerCase();
     var bases = [want.split('-')[0]];
     if (bases[0] === 'fil') bases.push('tl');
-    var exact = null, loose = null;
+    var list = [];
     voices.forEach(function(v){
       var l = String(v.lang || '').replace('_','-').toLowerCase();
-      if (l === want && !exact) exact = v;
-      if (bases.indexOf(l.split('-')[0]) !== -1 && !loose) loose = v;
+      if (bases.indexOf(l.split('-')[0]) === -1) return;
+      list.push({voice:v, exact:l === want, gender:voiceGender(v)});
     });
-    return exact || loose;
+    if (!list.length) return null;
+    var g = state.voiceGender;
+    function best(test){
+      var hit = null;
+      list.forEach(function(c){ if (test(c) && (!hit || (c.exact && !hit.exact))) hit = c; });
+      return hit;
+    }
+    var pick = best(function(c){ return c.gender === g; });
+    if (pick) return {voice:pick.voice, pitch:1};
+    pick = best(function(c){ return c.gender === ''; });
+    if (pick) return {voice:pick.voice, pitch:g === 'male' ? 0.6 : 1};
+    pick = best(function(){ return true; });
+    return {voice:pick.voice, pitch:g === 'male' ? 0.6 : 1.45};
   }
 
   // Phones only allow sound that starts from a tap. Call this inside every tap handler.
@@ -664,7 +722,8 @@
   }
 
   // result(true) when the whole text was spoken, result(false) when it could not be.
-  function speakWithDevice(text, bcp, voice, token, result){
+  function speakWithDevice(text, bcp, pick, token, result){
+    var voice = pick ? pick.voice : null;
     var settled = false, started = false, timer = null;
     function finish(ok){
       if (settled) return;
@@ -676,6 +735,7 @@
       var u = new SpeechSynthesisUtterance(text);
       u.lang = voice ? voice.lang : bcp;
       if (voice) u.voice = voice;
+      u.pitch = pick ? pick.pitch : (state.voiceGender === 'male' ? 0.6 : 1);
       u.onstart = function(){ started = true; clearTimeout(timer); };
       u.onend = function(){ finish(true); };
       u.onerror = function(){ finish(started); };
@@ -695,6 +755,17 @@
   function speakWithOnlineVoice(text, bcp, token, result){
     if (!player){ result(false); return; }
     var chunks = splitForSpeech(text, 180), i = 0, settled = false;
+    // The online voice is female only: for a male voice, lower its pitch.
+    var rate = state.voiceGender === 'male' ? 0.82 : 1;
+    function applyRate(){
+      try{
+        player.preservesPitch = rate === 1;
+        player.mozPreservesPitch = rate === 1;
+        player.webkitPreservesPitch = rate === 1;
+        player.defaultPlaybackRate = rate;
+        player.playbackRate = rate;
+      }catch(e){}
+    }
     function finish(ok){
       if (settled) return;
       settled = true;
@@ -706,6 +777,7 @@
       if (i >= chunks.length){ finish(true); return; }
       player.src = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=' +
         encodeURIComponent(onlineLang(bcp)) + '&q=' + encodeURIComponent(chunks[i++]);
+      applyRate();
       try{
         var p = player.play();
         if (p && p.catch) p.catch(function(){ finish(false); });
@@ -1097,6 +1169,7 @@
   function boot(){
     initLangSelect();
     initTtsToggle();
+    initVoiceGender();
     initManualPanel();
     initMicButtons();
     initHelpModal();
