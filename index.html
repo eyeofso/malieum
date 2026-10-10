@@ -284,7 +284,7 @@
       <span class="brand-mark">🗣️</span>
       <div>
         <h1>말이음</h1>
-        <span class="tagline">이주배경 친구들과 말이 통하는 순간</span>
+        <span class="tagline">이주배경 친구들과 말이 통하는 순간 · 버전 6</span>
       </div>
     </div>
     <button id="helpBtn" class="icon-btn" aria-label="설치와 공유 방법 보기">?</button>
@@ -685,10 +685,24 @@
     }
   }
 
+  var speakDone = null;        // callback of the speech in progress
+  var speakGuard = null;       // gives up on speech that never reports its end
+  var currentUtterance = null; // kept so the phone does not drop its end event
+
+  // Reports the end of the current speech exactly once.
+  function endSpeak(){
+    var d = speakDone;
+    speakDone = null;
+    clearTimeout(speakGuard);
+    if (d) d();
+  }
+
   function stopSound(){
     speakToken++;
-    if (player){ try{ player.onended = null; player.onerror = null; player.pause(); }catch(e){} }
+    if (player){ try{ player.onended = null; player.onerror = null; player.onplaying = null; player.pause(); }catch(e){} }
     if (hasTTS){ try{ window.speechSynthesis.cancel(); }catch(e){} }
+    currentUtterance = null;
+    endSpeak();
   }
 
   function splitForSpeech(text, max){
@@ -726,6 +740,7 @@
     }
     try{
       var u = new SpeechSynthesisUtterance(text);
+      currentUtterance = u;
       u.lang = voice ? voice.lang : bcp;
       if (voice) u.voice = voice;
       u.pitch = pick ? pick.pitch : (state.voiceGender === 'male' ? 0.8 : 1);
@@ -789,27 +804,33 @@
   }
 
   function speak(text, bcpLang, done){
-    done = done || function(){};
-    if (!text){ done(); return; }
+    if (!text){ if (done) done(); return; }
     stopSound();
     var token = speakToken;
-    var voice = hasTTS ? findVoice(bcpLang) : null;
+    speakDone = done || null;
+    // Some phones never report that speech has ended; do not wait forever.
+    speakGuard = setTimeout(function(){
+      if (token === speakToken) stopSound();
+    }, Math.min(45000, 6000 + text.length * 350));
+    function ended(){ if (token === speakToken) endSpeak(); }
     function failed(){
+      if (token !== speakToken) return;
       showStatus('이 휴대폰에서 음성을 재생하지 못했어요. 소리(미디어 음량)를 확인하고 말풍선의 🔊 를 눌러보세요.', true);
-      done();
+      endSpeak();
     }
+    var voice = hasTTS ? findVoice(bcpLang) : null;
     // The online voice is the more natural one, but it is female only.
     var onlineFirst = player && state.voiceGender === 'female' && onlineVoiceFailures < 2;
     if (hasTTS && !onlineFirst && (voice || voices.length === 0)){
       speakWithDevice(text, bcpLang, voice, token, function(ok){
-        if (ok){ done(); return; }
-        speakWithOnlineVoice(text, bcpLang, token, function(ok2){ if (ok2) done(); else failed(); });
+        if (ok){ ended(); return; }
+        speakWithOnlineVoice(text, bcpLang, token, function(ok2){ if (ok2) ended(); else failed(); });
       });
     } else {
       speakWithOnlineVoice(text, bcpLang, token, function(ok){
-        if (ok){ done(); return; }
+        if (ok){ ended(); return; }
         if (!hasTTS){ failed(); return; }
-        speakWithDevice(text, bcpLang, null, token, function(ok2){ if (ok2) done(); else failed(); });
+        speakWithDevice(text, bcpLang, null, token, function(ok2){ if (ok2) ended(); else failed(); });
       });
     }
   }
@@ -833,31 +854,18 @@
 
   var RecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
   var hasSTT = !!RecognitionCtor;
-  var recognition = null;
-  var isRecording = false;
-  var currentDirection = 'me';
   var micAsked = false;
-  var gotResult = false;
-  var listenStartedAt = 0;
+  var session = null;            // the listening session in progress, if any
   var MIC_BLOCKED_MSG = '마이크가 차단되어 있어요. 주소창의 자물쇠(🔒) → 권한 → 마이크를 "허용"으로 바꾼 뒤 새로고침 해주세요. 그동안은 아래에 글자로 입력할 수 있어요.';
-  // A turn that stays silent this long is handed to the other person.
-  var SILENT_TURN_MS = 3500;
+  var SILENCE_MS = 7000;         // nobody spoke: offer the turn to the other person
+  var PAUSE_MS = 1600;           // the speaker stopped talking: translate what was heard
+  var MAX_SESSION_MS = 30000;
+  var MAX_MIC_RETRIES = 3;
 
   // Conversation mode: the phone keeps listening and the turn passes back and forth by itself.
   // otherTyped: the other person's language cannot be heard on this phone, so they type instead.
   var conv = { on:false, turn:'me', busy:false, overridden:false, restartTimer:null, wakeLock:null,
-               failures:0, micErrors:0, retryDelay:0, otherTyped:false };
-  var MAX_MIC_RETRIES = 3;
-
-  function otherNeedsTyping(){
-    conv.otherTyped = true;
-    conv.turn = 'me';
-    conv.overridden = true;
-    conv.micErrors = 0;
-    openManualPanel('other');
-    showStatus(state.targetLang.name + '는 이 휴대폰이 음성으로 알아듣지 못하는 언어예요. 상대방 말은 아래에 글자로 입력해주세요. 내 말은 계속 음성으로 통역해요.', true);
-    renderTurn();
-  }
+               micErrors:0, langErrors:0, quickEnds:0, otherTyped:false };
 
   function otherSide(direction){ return direction === 'me' ? 'other' : 'me'; }
 
@@ -871,14 +879,26 @@
     el.turnBox.classList.toggle('me', conv.turn === 'me');
     el.turnBox.classList.toggle('other', conv.turn !== 'me');
     el.turnBox.classList.toggle('busy', conv.busy);
-    el.turnBox.classList.toggle('listening', isRecording && !conv.busy);
+    el.turnBox.classList.toggle('listening', !!session && !conv.busy);
     if (conv.busy){
       el.turnMain.textContent = '🔊 통역하는 중…';
-      el.turnSub.textContent = '다음 차례: ' + turnLabel(conv.turn);
+      el.turnSub.textContent = '다음 차례: ' + turnLabel(conv.turn) + ' · 눌러서 건너뛰기';
     } else {
       el.turnMain.textContent = '🎤 ' + turnLabel(conv.turn) + ' 말해주세요';
-      el.turnSub.textContent = conv.otherTyped ? '상대방 말은 아래에 글자로 입력해주세요' : '차례가 다르면 여기를 눌러 바꾸세요';
+      if (session && session.text){
+        el.turnSub.textContent = session.text;
+      } else {
+        el.turnSub.textContent = conv.otherTyped ? '상대방 말은 아래에 글자로 입력해주세요' : '차례가 다르면 여기를 눌러 바꾸세요';
+      }
     }
+  }
+
+  function otherNeedsTyping(){
+    conv.otherTyped = true;
+    conv.turn = 'me';
+    conv.micErrors = 0;
+    openManualPanel('other');
+    showStatus(state.targetLang.name + '는 이 휴대폰이 음성으로 알아듣지 못하는 언어예요. 상대방 말은 아래에 글자로 입력해주세요. 내 말은 계속 음성으로 통역해요.', true);
   }
 
   function fallbackToTyping(direction){
@@ -904,38 +924,136 @@
     });
   }
 
+  // Every turn gets a brand-new recognizer. Reusing one after an abort is what
+  // leaves some phones waiting for an "ended" signal that never comes.
   function listen(direction){
-    currentDirection = direction;
-    gotResult = false;
-    recognition.lang = direction === 'me' ? 'ko-KR' : state.targetLang.bcp;
+    if (session) closeSession(session, 'cancel');
+    var rec;
+    try{ rec = new RecognitionCtor(); }catch(e){ return false; }
+    var s = { rec:rec, direction:direction, text:'', error:'', closed:false,
+              startedAt:Date.now(), silenceTimer:null, pauseTimer:null, capTimer:null };
+    rec.lang = direction === 'me' ? 'ko-KR' : state.targetLang.bcp;
+    rec.continuous = false;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+
+    rec.onresult = function(e){
+      if (s.closed) return;
+      var text = '', lastFinal = false;
+      for (var i = 0; i < e.results.length; i++){
+        var r = e.results[i];
+        if (r && r[0]) text += r[0].transcript;
+        lastFinal = !!(r && r.isFinal);
+      }
+      text = text.trim();
+      if (!text) return;
+      s.text = text;
+      clearTimeout(s.silenceTimer);
+      clearTimeout(s.pauseTimer);
+      if (lastFinal){
+        closeSession(s, 'heard');
+      } else {
+        // Some phones never mark the sentence as finished: a pause is enough.
+        s.pauseTimer = setTimeout(function(){ closeSession(s, 'heard'); }, PAUSE_MS);
+        renderTurn();
+      }
+    };
+    rec.onerror = function(e){ if (!s.closed) s.error = (e && e.error) || 'unknown'; };
+    rec.onend = function(){ closeSession(s, 'ended'); };
+
+    session = s;
     try{
-      recognition.start();
+      rec.start();
     }catch(err){
-      isRecording = false;
-      renderTurn();
-      return false;
+      s.error = s.error || 'start-failed';
+      setTimeout(function(){ closeSession(s, 'ended'); }, 0);
     }
-    isRecording = true;
-    listenStartedAt = Date.now();
+    s.silenceTimer = setTimeout(function(){ closeSession(s, 'silence'); }, SILENCE_MS);
+    s.capTimer = setTimeout(function(){ closeSession(s, 'heard'); }, MAX_SESSION_MS);
     if (!el.statusBar.classList.contains('error')) hideStatus();
     renderTurn();
     return true;
   }
 
+  // The single way a listening session ends. why: heard | silence | ended | cancel
+  function closeSession(s, why){
+    if (s.closed) return;
+    s.closed = true;
+    clearTimeout(s.silenceTimer); clearTimeout(s.pauseTimer); clearTimeout(s.capTimer);
+    if (session === s) session = null;
+    try{ s.rec.onresult = null; s.rec.onerror = null; s.rec.onend = null; s.rec.abort(); }catch(e){}
+    if (why === 'cancel' || !conv.on){ renderTurn(); return; }
+
+    if (s.text){
+      conv.micErrors = 0; conv.langErrors = 0; conv.quickEnds = 0;
+      interpretInConversation(s.direction, s.text);
+      return;
+    }
+
+    var err = s.error, lasted = Date.now() - s.startedAt;
+    if (err === 'not-allowed'){
+      fallbackToTyping(s.direction);
+      return;
+    }
+    if (err === 'service-not-allowed' || err === 'language-not-supported'){
+      if (s.direction === 'other'){
+        // Korean is heard fine, so the phone's speech service lacks this language.
+        conv.langErrors++;
+        if (conv.langErrors >= 2) otherNeedsTyping();
+        convListenSoon(900);
+      } else {
+        conv.micErrors++;
+        if (conv.micErrors <= MAX_MIC_RETRIES){
+          convListenSoon(900 * conv.micErrors);
+        } else {
+          stopConversation();
+          openManualPanel('me');
+          showStatus('이 브라우저에서는 음성 인식을 쓸 수 없어요. 아이폰은 Safari, 안드로이드는 Chrome으로 열어주세요. 아이폰은 설정 → 일반 → 키보드에서 "받아쓰기 활성화"가 켜져 있어야 해요.', true);
+        }
+      }
+      renderTurn();
+      return;
+    }
+    if (err === 'audio-capture' || err === 'network' || err === 'start-failed'){
+      // Usually the microphone was still busy from the previous turn: wait and try again.
+      conv.micErrors++;
+      if (conv.micErrors <= MAX_MIC_RETRIES){
+        convListenSoon(700 * conv.micErrors);
+      } else {
+        stopConversation();
+        showStatus(err === 'network' ? '음성 인식에는 인터넷이 필요해요. 연결을 확인하고 대화 모드를 다시 눌러주세요.'
+                                     : '마이크를 시작하지 못했어요. 다른 앱이 마이크를 쓰고 있는지 확인하고 대화 모드를 다시 눌러주세요.', true);
+      }
+      renderTurn();
+      return;
+    }
+
+    // Nothing was said.
+    if (lasted < 800){
+      conv.quickEnds++;
+      if (conv.quickEnds > 8){
+        stopConversation();
+        showStatus('마이크가 바로 꺼져요. 잠시 뒤에 대화 모드를 다시 눌러주세요.', true);
+        return;
+      }
+      convListenSoon(700);
+    } else {
+      conv.quickEnds = 0;
+      if (!conv.otherTyped && (why === 'silence' || err === 'no-speech' || lasted >= 3500)){
+        conv.turn = otherSide(conv.turn);
+      }
+      convListenSoon(400);
+    }
+    renderTurn();
+  }
+
   function convListenSoon(delay){
     clearTimeout(conv.restartTimer);
     conv.restartTimer = setTimeout(function(){
-      if (!conv.on || conv.busy || isRecording) return;
+      if (!conv.on || conv.busy || session) return;
       if (!listen(conv.turn)){
-        conv.failures++;
-        if (conv.failures > 5){
-          stopConversation();
-          showStatus('마이크를 다시 시작하지 못했어요. 대화 모드를 다시 눌러주세요.', true);
-        } else {
-          convListenSoon(600);
-        }
-      } else {
-        conv.failures = 0;
+        stopConversation();
+        showStatus('마이크를 시작하지 못했어요. 대화 모드를 다시 눌러주세요.', true);
       }
     }, delay);
   }
@@ -951,13 +1069,13 @@
   function startConversation(){
     if (!hasSTT){
       openManualPanel('me');
-      showStatus('이 브라우저는 음성 인식을 지원하지 않아 대화 모드를 쓸 수 없어요. 안드로이드는 Chrome, 아이폰은 Safari로 열어주세요. 그동안은 글자로 입력할 수 있어요.', true);
+      showStatus('이 브라우저는 음성 인식을 지원하지 않아 대화 모드를 쓸 수 없어요. 아이폰은 Safari, 안드로이드는 Chrome으로 열어주세요. 그동안은 글자로 입력할 수 있어요.', true);
       return;
     }
     hideStatus();
     stopSound();
-    conv.on = true; conv.turn = 'me'; conv.busy = false; conv.overridden = false; conv.failures = 0;
-    conv.micErrors = 0; conv.retryDelay = 0; conv.otherTyped = false;
+    conv.on = true; conv.turn = 'me'; conv.busy = false; conv.overridden = false;
+    conv.micErrors = 0; conv.langErrors = 0; conv.quickEnds = 0; conv.otherTyped = false;
     updateConvButton();
     try{
       if (navigator.wakeLock && navigator.wakeLock.request){
@@ -966,7 +1084,7 @@
     }catch(e){}
     askMicOnce().then(function(ok){
       if (!ok){ fallbackToTyping('me'); return; }
-      if (conv.on) convListenSoon(250);
+      if (conv.on) convListenSoon(300);
     });
   }
 
@@ -975,109 +1093,49 @@
     conv.on = false; conv.busy = false;
     clearTimeout(conv.restartTimer);
     if (conv.wakeLock){ try{ conv.wakeLock.release(); }catch(e){} conv.wakeLock = null; }
-    if (recognition){ try{ recognition.abort(); }catch(e){} }
-    isRecording = false;
+    if (session) closeSession(session, 'cancel');
     stopSound();
     updateConvButton();
     hideStatus();
   }
 
+  // Someone tapped to say whose turn it is. Works at any moment, including while
+  // a translation is being read aloud (the reading is cut short).
   function setConversationTurn(direction){
     conv.turn = direction;
-    conv.overridden = true;
-    renderTurn();
-    if (conv.busy) return;
-    if (isRecording){
-      try{ recognition.abort(); }catch(e){}   // onend restarts with the new turn
-    } else {
-      convListenSoon(100);
+    if (conv.busy){
+      conv.overridden = true;
+      stopSound();           // ends the reading; listening resumes with the chosen turn
+      renderTurn();
+      return;
     }
+    if (session) closeSession(session, 'cancel');
+    renderTurn();
+    convListenSoon(500);
   }
 
-  // Runs one utterance through translate + speak while the microphone is paused,
+  // Runs one utterance through translate + speak while the microphone is off,
   // then goes back to listening.
   function interpretInConversation(direction, text){
+    if (session) closeSession(session, 'cancel');
+    clearTimeout(conv.restartTimer);
     conv.busy = true;
     conv.overridden = false;
+    conv.turn = otherSide(direction);      // shown as "next turn" while the translation plays
+    if (conv.otherTyped) conv.turn = 'me';
     renderTurn();
+    var finished = false;
     handleUtterance(direction, text, function(ok){
+      if (finished) return;
+      finished = true;
       if (!conv.on) return;
       conv.busy = false;
-      if (ok && !conv.overridden) conv.turn = otherSide(direction);
+      if (!ok && !conv.overridden) conv.turn = direction;   // translation failed: same speaker again
       if (conv.otherTyped) conv.turn = 'me';
       conv.overridden = false;
       renderTurn();
-      convListenSoon(500);
+      convListenSoon(600);   // let the speaker go quiet and the microphone become free
     });
-  }
-
-  if (hasSTT){
-    recognition = new RecognitionCtor();
-    recognition.continuous = false;
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-
-    recognition.onresult = function(e){
-      var text = e.results && e.results[0] && e.results[0][0] ? e.results[0][0].transcript : '';
-      if (!text || !conv.on) return;
-      gotResult = true;
-      conv.micErrors = 0;
-      interpretInConversation(currentDirection, text);
-    };
-    recognition.onerror = function(e){
-      if (e.error === 'aborted' || e.error === 'no-speech') return;   // onend decides what happens next
-      if (e.error === 'not-allowed'){
-        fallbackToTyping(currentDirection);
-        return;
-      }
-      if (e.error === 'service-not-allowed' && currentDirection === 'other'){
-        // Korean was heard fine, so the phone's speech service just lacks this language.
-        otherNeedsTyping();
-        return;
-      }
-      if (e.error === 'service-not-allowed'){
-        stopConversation();
-        openManualPanel(currentDirection);
-        showStatus('이 브라우저에서는 음성 인식을 쓸 수 없어요. 안드로이드는 Chrome, 아이폰은 Safari로 열어주세요. 그동안은 글자로 입력할 수 있어요.', true);
-        return;
-      }
-      if (e.error === 'language-not-supported' && currentDirection === 'other'){
-        otherNeedsTyping();
-        return;
-      }
-      if (e.error === 'audio-capture' || e.error === 'network'){
-        // Usually the microphone was still busy from the previous turn: wait and try again.
-        conv.micErrors++;
-        if (conv.micErrors <= MAX_MIC_RETRIES){
-          conv.overridden = true;            // keep the same turn
-          conv.retryDelay = 700 * conv.micErrors;
-          return;
-        }
-        if (e.error === 'audio-capture' && currentDirection === 'other'){
-          otherNeedsTyping();                // Korean works but this language never starts
-          return;
-        }
-      }
-      var msg = '음성을 인식하지 못했어요. 대화 모드를 다시 눌러주세요.';
-      if (e.error === 'audio-capture') msg = '마이크를 찾지 못했어요. 다른 앱이 마이크를 쓰고 있는지 확인해주세요.';
-      if (e.error === 'network') msg = '음성 인식에는 인터넷이 필요해요. 연결을 확인해주세요.';
-      stopConversation();
-      showStatus(msg, true);
-    };
-    recognition.onend = function(){
-      isRecording = false;
-      if (!conv.on){ renderTurn(); return; }
-      if (!conv.busy && !gotResult){
-        if (conv.overridden){
-          conv.overridden = false;
-        } else if (!conv.otherTyped && Date.now() - listenStartedAt >= SILENT_TURN_MS){
-          conv.turn = otherSide(conv.turn);   // nobody spoke: offer the turn to the other person
-        }
-        convListenSoon(conv.retryDelay || 300);
-        conv.retryDelay = 0;
-      }
-      renderTurn();
-    };
   }
 
   // done(ok) is called once the translation has been shown and read aloud (or has failed).
@@ -1133,9 +1191,8 @@
       el.manualInput.value = '';
       unlockSound();
       if (conv.on){
-        // Pause the microphone so the spoken translation is not picked up as speech.
-        gotResult = true;
-        if (isRecording){ try{ recognition.abort(); }catch(e){} }
+        // The microphone is paused so the spoken translation is not picked up as speech.
+        if (conv.busy) stopSound();
         interpretInConversation(state.manualDir, text);
       } else {
         handleUtterance(state.manualDir, text);
@@ -1153,26 +1210,19 @@
     el.turnBox.addEventListener('click', function(){
       unlockSound();
       if (!conv.on) return;
-      if (conv.otherTyped){
+      if (conv.otherTyped && !conv.busy){
         openManualPanel('other');
         return;
       }
-      setConversationTurn(otherSide(conv.turn));
+      setConversationTurn(conv.busy ? conv.turn : otherSide(conv.turn));
     });
     el.targetLangSelect.addEventListener('change', function(){
-      // A new language gets a fresh start: Korean first, microphone released before reuse.
+      // A new language gets a fresh start: Korean first, with a brand-new recognizer.
       conv.otherTyped = false;
-      conv.micErrors = 0;
+      conv.micErrors = 0; conv.langErrors = 0; conv.quickEnds = 0;
       if (conv.on){
         hideStatus();
-        conv.turn = 'me';
-        if (isRecording){
-          conv.overridden = true;
-          conv.retryDelay = 800;
-          try{ recognition.abort(); }catch(e){}
-        } else if (!conv.busy){
-          convListenSoon(800);
-        }
+        setConversationTurn('me');
       }
       renderTurn();
     });
